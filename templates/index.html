@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <link rel="stylesheet" href="static/xterm.css" />
+        <link rel="stylesheet" href="static/style.css" />
+        <style>
+            html,
+            body {
+                margin: 0;
+                padding: 0;
+                height: 100%;
+                background: #000;
+            }
+            #terminal {
+                position: absolute;
+                left: 0;
+                top: 0;
+                right: 0;
+                bottom: 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="terminal"></div>
+
+        <ul id="ctxMenu">
+            <li class="menu-item" data-cmd="copy">Copy</li>
+            <li class="menu-item" data-cmd="paste">Paste</li>
+            <li class="divider"></li>
+
+            <li class="menu-item has-submenu">
+                Layout
+                <ul class="submenu">
+                    <li class="menu-item" data-layout="qwerty">qwerty</li>
+                    <li class="menu-item" data-layout="colemak">colemak</li>
+                </ul>
+            </li>
+        </ul>
+
+        <script type="module">
+            import { Terminal } from "./static/xterm.mjs";
+            import { FitAddon } from "./static/addon-fit.mjs";
+            import { ClipboardAddon } from "./static/addon-clipboard.mjs";
+            import { setupContextMenu } from "./static/menu.mjs";
+            import { makeKeyHandler } from "./static/layout.mjs";
+
+            let currentLayout = "qwerty";
+
+            function initTerminal() {
+                const term = new Terminal({
+                    scrollback: 1000,
+                    fontFamily: "courier new, courier, monospace",
+                });
+                const fitAddon = new FitAddon();
+                term.loadAddon(fitAddon);
+
+                const clipboardAddon = new ClipboardAddon();
+                term.loadAddon(clipboardAddon);
+
+                const container = document.getElementById("terminal");
+                term.open(container);
+                fitAddon.fit();
+
+                const base = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+
+                const wsURL = new URL(base + "ws", location);
+
+                wsURL.protocol = wsURL.protocol === "https:" ? "wss:" : "ws:";
+
+                console.log("connect to", wsURL.href);
+                const socket = new WebSocket(wsURL);
+                socket.binaryType = "arraybuffer";
+                const decoder = new TextDecoder();
+
+                socket.onopen = () => {
+                    term.onData((data) => {
+                        socket.send(JSON.stringify({ event: "data", value: data }));
+                    });
+
+                    function doResize() {
+                        fitAddon.fit();
+                        socket.send(
+                            JSON.stringify({
+                                event: "resize",
+                                value: { rows: term.rows, cols: term.cols },
+                            }),
+                        );
+                    }
+                    window.addEventListener("resize", doResize);
+                    doResize();
+
+                    setInterval(() => {
+                        socket.send(JSON.stringify({ event: "heartbeat" }));
+                    }, 10_000);
+
+                    socket.onmessage = (msg) => {
+                        if (typeof msg.data === "string") {
+                            try {
+                                const data = JSON.parse(msg.data);
+                                if (data.event === "heartbeat-pong") {
+                                    console.log("[Client] heartbeat-pong");
+                                } else {
+                                    console.log("[Client] message:", data);
+                                }
+                            } catch (err) {
+                                console.log("Error parsing JSON:", err);
+                            }
+                        } else {
+                            const data = decoder.decode(msg.data);
+                            term.write(data);
+                        }
+                    };
+
+                    setupContextMenu(document.getElementById("terminal"), {
+                        term,
+                        onLayoutChange: (layout) => {
+                            currentLayout = layout;
+                        },
+                    });
+
+                    const keyHandler = makeKeyHandler(socket, () => currentLayout);
+                    term.attachCustomKeyEventHandler(keyHandler);
+                };
+            }
+
+            document.addEventListener("DOMContentLoaded", initTerminal);
+        </script>
+    </body>
+</html>
