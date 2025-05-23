@@ -1,5 +1,2 @@
 pub mod common;
-pub use common::{AppError, AppState, ClientMsg, scrollback_lines};
-
-pub mod logger;
-pub use logger::Logger;
+pub use common::{AppError, AppState, AppConfig, ClientMsg, buf_trim, logger};

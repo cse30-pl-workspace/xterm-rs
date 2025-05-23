@@ -2,8 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <link rel="stylesheet" href="static/xterm.css" />
-        <link rel="stylesheet" href="static/style.css" />
+        <link rel="stylesheet" href="static/css/xterm.css" />
         <style>
             html,
             body {
@@ -24,26 +23,12 @@
     <body>
         <div id="terminal"></div>
 
-        <ul id="ctxMenu">
-            <li class="menu-item" data-cmd="copy">Copy</li>
-            <li class="menu-item" data-cmd="paste">Paste</li>
-            <li class="divider"></li>
-
-            <li class="menu-item has-submenu">
-                Layout
-                <ul class="submenu">
-                    <li class="menu-item" data-layout="qwerty">qwerty</li>
-                    <li class="menu-item" data-layout="colemak">colemak</li>
-                </ul>
-            </li>
-        </ul>
-
         <script type="module">
-            import { Terminal } from "./static/xterm.mjs";
-            import { FitAddon } from "./static/addon-fit.mjs";
-            import { ClipboardAddon } from "./static/addon-clipboard.mjs";
-            import { setupContextMenu } from "./static/menu.mjs";
-            import { makeKeyHandler } from "./static/layout.mjs";
+            import { Terminal } from "./static/js/xterm.mjs";
+            import { FitAddon } from "./static/js/addon-fit.mjs";
+            import { ClipboardAddon } from "./static/js/addon-clipboard.mjs";
+            import { makeKeyHandler } from "./static/js/layout.mjs";
+            import themes from "./static/js/themes.min.mjs";
 
             let currentLayout = "qwerty";
 
@@ -51,6 +36,7 @@
                 const term = new Terminal({
                     scrollback: 1000,
                     fontFamily: "courier new, courier, monospace",
+                    reflowOnResize: true,
                 });
                 const fitAddon = new FitAddon();
                 term.loadAddon(fitAddon);
@@ -74,6 +60,7 @@
                 const decoder = new TextDecoder();
 
                 socket.onopen = () => {
+                    term.write('\x1bc');
                     term.onData((data) => {
                         socket.send(JSON.stringify({ event: "data", value: data }));
                     });
@@ -100,24 +87,28 @@
                                 const data = JSON.parse(msg.data);
                                 if (data.event === "heartbeat-pong") {
                                     console.log("[Client] heartbeat-pong");
-                                } else {
+                                }
+                                else if (data.event === "config") {
+                                    const theme = data.value.theme;
+                                    const layout = data.value.layout;
+                                    term.options.theme = themes[theme];
+                                    document.body.style.background = themes[theme]?.background ?? "#000";
+
+                                    currentLayout = layout;
+                                }
+                                else {
                                     console.log("[Client] message:", data);
                                 }
-                            } catch (err) {
+                            }
+                            catch (err) {
                                 console.log("Error parsing JSON:", err);
                             }
-                        } else {
+                        }
+                        else {
                             const data = decoder.decode(msg.data);
                             term.write(data);
                         }
                     };
-
-                    setupContextMenu(document.getElementById("terminal"), {
-                        term,
-                        onLayoutChange: (layout) => {
-                            currentLayout = layout;
-                        },
-                    });
 
                     const keyHandler = makeKeyHandler(socket, () => currentLayout);
                     term.attachCustomKeyEventHandler(keyHandler);

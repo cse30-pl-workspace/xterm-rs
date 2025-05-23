@@ -1,14 +1,30 @@
-use crate::models::Logger;
+use crate::caster::Caster;
+use crate::config::ConfigWatcher;
 use crate::pty::PtyManager;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use memchr::memrchr;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::{sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 use unicode_width::UnicodeWidthChar;
+
+fn default_layout() -> String {
+    "qwerty".into()
+}
+fn default_theme() -> String {
+    "Default".into()
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppConfig {
+    #[serde(default = "default_layout")]
+    pub layout: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
@@ -27,8 +43,8 @@ pub struct Size {
 pub struct AppState {
     pub start: Instant,
     pub pty: Arc<PtyManager>,
-    pub pty_dbg: Arc<PtyManager>,
-    pub logger: Arc<Logger>,
+    pub caster: Option<Arc<Caster>>,
+    pub watcher: ConfigWatcher,
     pub size: Arc<RwLock<(u16, u16)>>,
     pub scrollback: u32,
 }
@@ -47,52 +63,59 @@ impl IntoResponse for AppError {
     }
 }
 
-pub fn scrollback_lines(buf: &[u8], rows: u16, cols: u16, scrollback: u32) -> usize {
-    let max_lines = rows as u32 + scrollback + 50; // rows + scrollback + 50?
-
-    let mut line_count = 0;
+pub fn buf_trim(buf: &[u8], cols: u16, max_lines: u32) -> usize {
+    let mut lines = 0;
     let mut col = 0;
     let mut i = buf.len();
 
-    while i > 0 && line_count < max_lines {
+    while i > 0 && lines < max_lines {
         i -= 1;
-        let b = buf[i];
-
-        match b {
+        match buf[i] {
             b'\n' => {
-                line_count += 1;
+                lines += 1;
                 col = 0;
             }
             0x20..=0x7e => {
                 col += 1;
                 if col == cols {
-                    line_count += 1;
+                    lines += 1;
                     col = 0;
                 }
             }
             0x80..=0xff => {
-                let (ch, size) = {
-                    let mut start = i;
-                    while start > 0 && (buf[start] & 0b1100_0000) == 0b1000_0000 {
-                        start -= 1;
-                    }
-                    let s = std::str::from_utf8(&buf[start..=i]).unwrap_or(" ");
-                    (s.chars().next().unwrap(), i - start + 1)
-                };
+                let mut start = i;
+                while start > 0 && (buf[start] & 0b1100_0000) == 0b1000_0000 {
+                    start -= 1;
+                }
+                let ch = std::str::from_utf8(&buf[start..=i])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                    .unwrap_or(' ');
                 col += UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
                 if col >= cols {
-                    line_count += 1;
+                    lines += 1;
                     col = if col == cols { 0 } else { col - cols };
                 }
-                i -= size - 1;
+                i = start;
             }
             0x1b => {
-                if let Some(lbrk) = memrchr(b'm', &buf[..=i]) {
-                    i = lbrk.saturating_sub(1);
+                if let Some(pos) = memrchr(b'm', &buf[..=i]) {
+                    i = pos.saturating_sub(1);
                 }
             }
             _ => {}
         }
     }
     i
+}
+
+pub fn logger<P>(kind: &str, payload: P)
+where
+    P: Serialize,
+{
+    let payload = serde_json::json!([kind, payload]);
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &payload).ok();
+    stdout.write_all(b"\n").ok();
+    stdout.flush().ok();
 }

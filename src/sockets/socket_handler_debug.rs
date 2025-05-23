@@ -4,7 +4,7 @@ use crate::pty::PtyManager;
 use axum::{
     extract::{
         Extension,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
@@ -15,8 +15,25 @@ use tokio::select;
 use tokio::time::{self, Duration};
 
 pub async fn ws_handler_debug(ws: WebSocketUpgrade, Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
-    let pty_dbg = Arc::clone(&state.pty_dbg);
-    ws.on_upgrade(move |socket| debug_session(socket, pty_dbg))
+    let size_lock = Arc::clone(&state.size);
+
+    ws.on_upgrade(move |mut socket| async move {
+        let (rows, cols) = *size_lock.read().await;
+        match PtyManager::new(rows, cols, 0).await {
+            Ok(new_pty) => {
+                let pty = Arc::new(new_pty);
+                debug_session(socket, pty).await;
+            }
+            Err(e) => {
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: Utf8Bytes::from(format!("pty init error: {e}")),
+                    })))
+                    .await;
+            }
+        }
+    })
 }
 
 async fn debug_session(mut socket: WebSocket, pty: Arc<PtyManager>) {
