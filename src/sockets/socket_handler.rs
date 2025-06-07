@@ -1,4 +1,4 @@
-use crate::models::AppState;
+use crate::models::{AppState, logger};
 use axum::{
     extract::{
         Extension,
@@ -9,38 +9,17 @@ use axum::{
 use bytes::Bytes;
 use std::sync::Arc;
 use tokio::select;
-use tokio::time::{self, Duration};
 
-use crate::models::{ClientMsg, buf_trim};
+use crate::models::ClientMsg;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| client_session(socket, state))
 }
 
-async fn flush(buf: &mut Vec<u8>, state: &AppState, socket: &mut WebSocket) -> anyhow::Result<()> {
-    if buf.is_empty() {
-        return Ok(());
-    }
-
-    let data = std::mem::take(buf);
-
-    let (rows, cols) = *state.size.read().await;
-    let i = buf_trim(&data, cols, rows as u32 + state.scrollback + 50);
-    let scrollback = &data[i..];
-    let i = buf_trim(&data, cols, rows as u32 + 20);
-    let view = &data[i..];
-
-    if let Some(caster) = &state.caster {
-        caster.output(state.start.elapsed().as_secs_f32(), view.to_vec());
-    }
-
-    socket.send(Message::Binary(Bytes::copy_from_slice(scrollback))).await?;
-    Ok(())
-}
-
 async fn client_session(mut socket: WebSocket, state: Arc<AppState>) {
     let (mut rx, history) = state.pty.subscribe().await;
-    if socket.send(Message::Binary(Bytes::from(history))).await.is_err() {
+    if let Err(e) = socket.send(Message::Binary(Bytes::from(history.to_vec()))).await {
+        logger("error", format!("Failed to send history: {}", e));
         return;
     }
 
@@ -52,20 +31,13 @@ async fn client_session(mut socket: WebSocket, state: Arc<AppState>) {
     });
     let _ = socket.send(Message::from(payload.to_string())).await;
 
-    let mut buf = Vec::new();
-    let mut interval = time::interval(Duration::from_millis(10));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-
     loop {
         select! {
-            _ = interval.tick() => {
-                if !buf.is_empty() {
-                    flush(&mut buf, &state, &mut socket).await.ok();
-                }
-            }
-
             Ok(bytes) = rx.recv() => {
-                buf.extend_from_slice(&bytes);
+                socket.send(Message::Binary(Bytes::copy_from_slice(&bytes))).await.ok();
+                if let Some(caster) = &state.caster {
+                    caster.output(state.start.elapsed().as_secs_f32(), bytes.to_vec());
+                }
             }
 
             Ok(()) = cfg_rx.changed() => {
@@ -114,7 +86,7 @@ async fn handle(msg: ClientMsg, state: &AppState, sock: &mut WebSocket) -> anyho
                 caster.resize(state.start.elapsed().as_secs_f32(), value.rows, value.cols);
             }
             state.pty.resize(value.rows, value.cols).await?;
-            let mut sz = state.size.write().await;
+            let mut sz = state.stty_size.write().await;
             *sz = (value.rows, value.cols);
         }
         ClientMsg::Heartbeat => {

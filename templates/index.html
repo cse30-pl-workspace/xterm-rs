@@ -57,14 +57,22 @@
                 console.log("connect to", wsURL.href);
                 const socket = new WebSocket(wsURL);
                 socket.binaryType = "arraybuffer";
-                const decoder = new TextDecoder();
+                const decoder = new TextDecoder("utf-8", { fatal: false });
 
-                socket.onopen = () => {
-                    term.write('\x1bc');
+                let historyReady = false;
+                let historyReadyTimer;
+
+                function unlockInput() {
+                    if (historyReady) return;
+                    historyReady = true;
+                    clearTimeout(historyReadyTimer);
+
                     term.onData((data) => {
                         socket.send(JSON.stringify({ event: "data", value: data }));
                     });
+                }
 
+                socket.onopen = () => {
                     function doResize() {
                         fitAddon.fit();
                         socket.send(
@@ -105,8 +113,10 @@
                             }
                         }
                         else {
-                            const data = decoder.decode(msg.data);
-                            term.write(data);
+                            const data = decoder.decode(msg.data, { stream: true });
+                            term.write(data, () => {
+                                unlockInput();
+                            });
                         }
                     };
 

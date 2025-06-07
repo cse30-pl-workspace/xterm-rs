@@ -1,3 +1,4 @@
+use crate::models::RingBytes;
 use anyhow::{Context, Result};
 use portable_pty::*;
 use std::{
@@ -13,7 +14,7 @@ const BUF_SIZE: usize = 4096;
 
 pub struct PtyManager {
     tx: broadcast::Sender<Vec<u8>>,
-    history: Arc<Mutex<Vec<u8>>>,
+    history: Arc<Mutex<RingBytes>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     size: Arc<Mutex<PtySize>>,
@@ -22,7 +23,7 @@ pub struct PtyManager {
 impl PtyManager {
     pub async fn new(rows: u16, cols: u16, history_limit: usize) -> Result<Self> {
         let (tx, _) = broadcast::channel::<Vec<u8>>(4096);
-        let history = Arc::new(Mutex::new(Vec::new()));
+        let history = Arc::new(Mutex::new(RingBytes::new(history_limit)));
         let size = Arc::new(Mutex::new(PtySize {
             rows,
             cols,
@@ -40,7 +41,6 @@ impl PtyManager {
             Arc::clone(&writer),
             Arc::clone(&master),
             Arc::clone(&size),
-            history_limit,
         );
 
         Ok(Self {
@@ -52,7 +52,7 @@ impl PtyManager {
         })
     }
 
-    pub async fn subscribe(&self) -> (broadcast::Receiver<Vec<u8>>, Vec<u8>) {
+    pub async fn subscribe(&self) -> (broadcast::Receiver<Vec<u8>>, RingBytes) {
         (self.tx.subscribe(), self.history.lock().await.clone())
     }
 
@@ -91,23 +91,12 @@ impl PtyManager {
         Ok((writer, pair.master, child))
     }
 
-    #[inline]
-    fn push_history(history: &mut Vec<u8>, new: &[u8], history_limit: usize) {
-        history.extend_from_slice(new);
-
-        if history.len() > history_limit {
-            let excess = history.len() - history_limit;
-            history.drain(..excess);
-        }
-    }
-
     fn launch_reader(
         tx: broadcast::Sender<Vec<u8>>,
-        history: Arc<Mutex<Vec<u8>>>,
+        history: Arc<Mutex<RingBytes>>,
         writer: Arc<Mutex<Box<dyn Write + Send>>>,
         master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
         size: Arc<Mutex<PtySize>>,
-        history_limit: usize,
     ) {
         task::spawn_blocking(move || {
             loop {
@@ -118,7 +107,7 @@ impl PtyManager {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            Self::push_history(&mut history.blocking_lock(), &buf[..n], history_limit);
+                            history.blocking_lock().extend(&buf[..n]);
                             let _ = tx.send(buf[..n].to_vec());
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -129,7 +118,7 @@ impl PtyManager {
 
                 const COMPLETED: &[u8] = b"[Process completed]\r\n\r\n";
                 {
-                    Self::push_history(&mut history.blocking_lock(), COMPLETED, history_limit);
+                    history.blocking_lock().extend(COMPLETED);
                     let _ = tx.send(COMPLETED.to_vec());
                 }
 
@@ -141,7 +130,7 @@ impl PtyManager {
                     Err(e) => {
                         let msg = format!("[Respawn failed: {e}]\r\n").into_bytes();
                         let _ = tx.send(msg.clone());
-                        Self::push_history(&mut history.blocking_lock(), &msg, history_limit);
+                        history.blocking_lock().extend(&msg);
                         break;
                     }
                 }

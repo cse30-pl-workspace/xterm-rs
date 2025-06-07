@@ -24,8 +24,6 @@ use sockets::{ws_handler, ws_handler_debug};
 
 use clap::{Parser, ValueHint};
 
-const HEARTBEAT_FN: &str = "heartbeat.log";
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = "TODO")]
 struct Args {
@@ -42,14 +40,6 @@ struct Args {
 
     #[arg(long, default_value_t = 80u16, long_help = "Terminal initial columns")]
     cols: u16,
-
-    #[arg(
-        long,
-        default_value_t = 10u64,
-        value_parser = clap::value_parser!(u64).range(1..=1000),
-        long_help = "Terminal refresh interval (ms)"
-    )]
-    refresh_interval: u64,
 
     #[arg(long, value_hint=ValueHint::DirPath, long_help = "Path to static files")]
     resource: std::path::PathBuf,
@@ -70,9 +60,6 @@ struct Args {
 
     #[arg(short, long, default_value_t = 8080usize, long_help = "Port to listen on")]
     port: usize,
-
-    #[arg(long, default_value_t = 1000u32, long_help = "Terminal scrollback lines")]
-    scrollback: u32,
 
     #[arg(
         long,
@@ -107,28 +94,28 @@ async fn main() -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
         .as_millis();
+    let start = std::time::Instant::now();
 
     let caster = match args.log_level {
         0 => None,
         x => Some(Caster::new(
             args.log_dir,
+            start,
             ts_millis,
-            &format!("{}.cast", ts_millis),
-            HEARTBEAT_FN,
             x == 2,
             args.verbose_interval,
+            (args.rows, args.cols),
         )?),
     };
 
     let (cfg_watcher, _join) = spawn_cfg_watcher(args.config_path).await?;
 
     let state = Arc::new(AppState {
-        start: std::time::Instant::now(),
+        start,
         pty: Arc::clone(&pty),
         caster,
         watcher: cfg_watcher,
-        size: Arc::new(tokio::sync::RwLock::new((args.rows, args.cols))),
-        scrollback: args.scrollback,
+        stty_size: Arc::new(tokio::sync::RwLock::new((args.rows, args.cols))),
     });
 
     let app = Router::new()

@@ -7,11 +7,13 @@ use axum::{
 };
 use memchr::memrchr;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::{sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 use unicode_width::UnicodeWidthChar;
 
+// app config
 fn default_layout() -> String {
     "qwerty".into()
 }
@@ -26,16 +28,16 @@ pub struct AppConfig {
     pub theme: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "event", rename_all = "lowercase")]
 pub enum ClientMsg {
     Data { value: String },
-    Resize { value: Size },
+    Resize { value: SttySize },
     Heartbeat,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct Size {
+pub struct SttySize {
     pub cols: u16,
     pub rows: u16,
 }
@@ -45,8 +47,7 @@ pub struct AppState {
     pub pty: Arc<PtyManager>,
     pub caster: Option<Arc<Caster>>,
     pub watcher: ConfigWatcher,
-    pub size: Arc<RwLock<(u16, u16)>>,
-    pub scrollback: u32,
+    pub stty_size: Arc<RwLock<(u16, u16)>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,4 +119,43 @@ where
     serde_json::to_writer(&mut stdout, &payload).ok();
     stdout.write_all(b"\n").ok();
     stdout.flush().ok();
+}
+
+// loop queue
+#[derive(Clone)]
+pub struct RingBytes {
+    buf: VecDeque<u8>,
+    limit: usize,
+}
+
+impl RingBytes {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            buf: VecDeque::with_capacity(limit),
+            limit,
+        }
+    }
+
+    pub fn extend(&mut self, chunk: &[u8]) {
+        match chunk.len().checked_sub(self.limit) {
+            Some(x) => {
+                self.buf.clear();
+                self.buf.extend(&chunk[x..]);
+            }
+            None => {
+                if let Some(x) = (self.buf.len() + chunk.len()).checked_sub(self.limit) {
+                    self.buf.drain(..x);
+                }
+                self.buf.extend(chunk);
+            }
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let (a, b) = self.buf.as_slices();
+        let mut v = Vec::with_capacity(self.buf.len());
+        v.extend_from_slice(a);
+        v.extend_from_slice(b);
+        v
+    }
 }

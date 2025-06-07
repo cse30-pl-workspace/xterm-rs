@@ -11,11 +11,11 @@ use axum::{
 
 use bytes::Bytes;
 use std::sync::Arc;
+
 use tokio::select;
-use tokio::time::{self, Duration};
 
 pub async fn ws_handler_debug(ws: WebSocketUpgrade, Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
-    let size_lock = Arc::clone(&state.size);
+    let size_lock = Arc::clone(&state.stty_size);
 
     ws.on_upgrade(move |mut socket| async move {
         let (rows, cols) = *size_lock.read().await;
@@ -38,21 +38,12 @@ pub async fn ws_handler_debug(ws: WebSocketUpgrade, Extension(state): Extension<
 
 async fn debug_session(mut socket: WebSocket, pty: Arc<PtyManager>) {
     let (mut rx, history) = pty.subscribe().await;
-    let _ = socket.send(Message::Binary(Bytes::from(history))).await;
-
-    let mut buf = Vec::new();
-    let mut tick = time::interval(Duration::from_millis(20));
+    let _ = socket.send(Message::Binary(Bytes::from(history.to_vec()))).await;
 
     loop {
         select! {
-            Ok(bytes) = rx.recv() => buf.extend_from_slice(&bytes),
-
-            _ = tick.tick() => {
-                if !buf.is_empty() {
-                    let _ = socket
-                        .send(Message::Binary(Bytes::from(std::mem::take(&mut buf))))
-                        .await;
-                }
+            Ok(bytes) = rx.recv() => {
+                socket.send(Message::Binary(Bytes::from(bytes))).await.ok();
             }
 
             msg = socket.recv() => match msg {
@@ -81,6 +72,6 @@ async fn apply_cmd(cmd: ClientMsg, pty: &PtyManager) {
         ClientMsg::Resize { value } => {
             let _ = pty.resize(value.rows, value.cols).await;
         }
-        ClientMsg::Heartbeat => {}
+        _ => {}
     }
 }
